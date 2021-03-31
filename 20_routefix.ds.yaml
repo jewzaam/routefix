@@ -1,50 +1,41 @@
-kind: DaemonSet
 apiVersion: apps/v1
+kind: DaemonSet
 metadata:
-  name: drop-icmp
-  namespace: openshift-sdn
   annotations:
-    kubernetes.io/description: |
-      This daemonset launches the sock on master networking components.
-    release.openshift.io/version: "{{.ReleaseVersion}}"
+    deprecated.daemonset.template.generation: '1'
+  name: routefix
+  namespace: openshift-azure-routefix
 spec:
+  revisionHistoryLimit: 10
   selector:
     matchLabels:
-      app: drop-icmp
-  strategy:
-    type: RollingUpdate
+      app: routefix
+  updateStrategy:
     rollingUpdate:
-      # by default, Deployments spin up the new pod before terminating the old one
-      # but we don't want that - because ovsdb holds the lock.
-      maxSurge: 0
       maxUnavailable: 1
+    type: RollingUpdate
   template:
     metadata:
+      creationTimestamp: null
       labels:
-        app: drop-icmp
-        component: network
-        type: infra
-        openshift.io/component: network
-        kubernetes.io/os: "linux"
+        app: routefix
     spec:
-      serviceAccountName: sdn-controller
+      serviceAccount: routefix
+      serviceAccountName: routefix
       hostNetwork: true
-      hostPID: true
-      priorityClassName: "system-cluster-critical"
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
       containers:
-      # ovnkube master: convert kubernetes objects in to nbdb logical network components
       - name: drop-icmp
-        image: quay.io/mccv1r0/socksink-sudo:latest
-        command:
+        image: quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:bcc1fb20f06f00829727cb46ff21e22103fd4c737fdcbbf2fab13121f31ebcbd
+        args:
         - /bin/bash
         - -c
         - |
           set -xe
-          if [[ -f "/env/_master" ]]; then
-            set -o allexport
-            source "/env/_master"
-            set +o allexport
-          fi
 
           echo "I$(date "+%m%d %H:%M:%S.%N") - drop-icmp - start drop-icmp ${K8S_NODE}"
           iptables -X CHECK_ICMP_SOURCE || true
@@ -57,51 +48,74 @@ spec:
           iptables -A ICMP_ACTION -j LOG
           iptables -A ICMP_ACTION -j DROP
           oc observe nodes -a '{ .status.addresses[1].address }' -- /tmp/add_iptables.sh
-          tail -F /dev/null
+        imagePullPolicy: IfNotPresent
         lifecycle:
           preStop:
             exec:
-              command: ["/bin/bash", "-c", "echo drop-icmp done"]
+              command:
+              - /bin/bash
+              - -c
+              - echo drop-icmp done
         securityContext:
           privileged: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
         volumeMounts:
         - mountPath: /
           name: host-slash
-        - name: add-iptables
-          mountPath: /tmp/add_iptables.sh
+        - mountPath: /tmp/add_iptables.sh
+          name: add-iptables
           subPath: add_iptables.sh
         resources:
           requests:
             cpu: 10m
             memory: 300Mi
         env:
-        - name: OVN_KUBE_LOG_LEVEL
-          value: "4"
         - name: K8S_NODE
           valueFrom:
             fieldRef:
+              apiVersion: v1
               fieldPath: spec.nodeName
-        - name: K8S_NODE_IP
-          valueFrom:
-            fieldRef:
-              fieldPath: status.hostIP
-      nodeSelector:
-        ### node-role.kubernetes.io/master: ""
-        beta.kubernetes.io/os: "linux"
+      - args:
+        - /bin/bash
+        - -c
+        - |
+          while true;
+          do
+              NOW=$(date "+%Y-%m-%d %H:%M:%S")
+              DROPPED_PACKETS=$(ovs-ofctl -O OpenFlow13 dump-flows br0 | sed -ne '/table=10,.* actions=drop/ { s/.* n_packets=//; s/,.*//; p }')
+              if [ "$DROPPED_PACKETS" != "" ] && [ "$DROPPED_PACKETS" -gt 1000 ];
+              then
+                  echo "$NOW table=10 actions=drop packets=$DROPPED_PACKETS broken=true"
+              else
+                  echo "$NOW table=10 actions=drop packets=$DROPPED_PACKETS broken=false"
+              fi
+              sleep 60
+          done
+        image: quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:bcc1fb20f06f00829727cb46ff21e22103fd4c737fdcbbf2fab13121f31ebcbd
+        imagePullPolicy: IfNotPresent
+        name: detect
+        resources: {}
+        securityContext:
+          privileged: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /
+          name: host-slash
+          readOnly: true
       volumes:
       - name: host-slash
         hostPath:
           path: /
+          type: ''
       - name: add-iptables
         configMap:
+          defaultMode: 365
           name: add-iptables
-          defaultMode: 0555
       tolerations:
-      - key: "node-role.kubernetes.io/master"
-        operator: "Exists"
-      - key: "node.kubernetes.io/not-ready"
-        operator: "Exists"
-      - key: "node.kubernetes.io/unreachable"
-        operator: "Exists"
-      - key: "node.kubernetes.io/network-unavailable"
-        operator: "Exists"
+      - effect: NoExecute
+        operator: Exists
+      - effect: NoSchedule
+        operator: Exists
+
