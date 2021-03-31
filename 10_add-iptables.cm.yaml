@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: add-iptables
+data:
+  add_iptables.sh: |
+   #!/bin/sh
+   echo "Adding ICMP drop rule for '$2' "
+   #iptables -C CHECK_ICMP_SOURCE -p icmp -s $2 -j ICMP_ACTION || iptables -A CHECK_ICMP_SOURCE -p icmp -s $2 -j ICMP_ACTION
+   if iptables -C CHECK_ICMP_SOURCE -p icmp -s $2 -j ICMP_ACTION
+   then
+        echo "iptables already set for $2"
+   else
+        iptables -A CHECK_ICMP_SOURCE -p icmp -s $2 -j ICMP_ACTION
+   fi
+   #iptables -nvL

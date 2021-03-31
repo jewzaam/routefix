@@ -1,0 +1,107 @@
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: drop-icmp
+  namespace: openshift-sdn
+  annotations:
+    kubernetes.io/description: |
+      This daemonset launches the sock on master networking components.
+    release.openshift.io/version: "{{.ReleaseVersion}}"
+spec:
+  selector:
+    matchLabels:
+      app: drop-icmp
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # by default, Deployments spin up the new pod before terminating the old one
+      # but we don't want that - because ovsdb holds the lock.
+      maxSurge: 0
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: drop-icmp
+        component: network
+        type: infra
+        openshift.io/component: network
+        kubernetes.io/os: "linux"
+    spec:
+      serviceAccountName: sdn-controller
+      hostNetwork: true
+      hostPID: true
+      priorityClassName: "system-cluster-critical"
+      containers:
+      # ovnkube master: convert kubernetes objects in to nbdb logical network components
+      - name: drop-icmp
+        image: quay.io/mccv1r0/socksink-sudo:latest
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -xe
+          if [[ -f "/env/_master" ]]; then
+            set -o allexport
+            source "/env/_master"
+            set +o allexport
+          fi
+
+          echo "I$(date "+%m%d %H:%M:%S.%N") - drop-icmp - start drop-icmp ${K8S_NODE}"
+          iptables -X CHECK_ICMP_SOURCE || true
+          iptables -N CHECK_ICMP_SOURCE || true
+          iptables -F CHECK_ICMP_SOURCE
+          iptables -D INPUT -p icmp --icmp-type fragmentation-needed -j CHECK_ICMP_SOURCE || true
+          iptables -I INPUT -p icmp --icmp-type fragmentation-needed -j CHECK_ICMP_SOURCE
+          iptables -N ICMP_ACTION || true
+          iptables -F ICMP_ACTION
+          iptables -A ICMP_ACTION -j LOG
+          iptables -A ICMP_ACTION -j DROP
+          oc observe nodes -a '{ .status.addresses[1].address }' -- /tmp/add_iptables.sh
+          tail -F /dev/null
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/bash", "-c", "echo drop-icmp done"]
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - mountPath: /
+          name: host-slash
+        - name: add-iptables
+          mountPath: /tmp/add_iptables.sh
+          subPath: add_iptables.sh
+        resources:
+          requests:
+            cpu: 10m
+            memory: 300Mi
+        env:
+        - name: OVN_KUBE_LOG_LEVEL
+          value: "4"
+        - name: K8S_NODE
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: K8S_NODE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+      nodeSelector:
+        ### node-role.kubernetes.io/master: ""
+        beta.kubernetes.io/os: "linux"
+      volumes:
+      - name: host-slash
+        hostPath:
+          path: /
+      - name: add-iptables
+        configMap:
+          name: add-iptables
+          defaultMode: 0555
+      tolerations:
+      - key: "node-role.kubernetes.io/master"
+        operator: "Exists"
+      - key: "node.kubernetes.io/not-ready"
+        operator: "Exists"
+      - key: "node.kubernetes.io/unreachable"
+        operator: "Exists"
+      - key: "node.kubernetes.io/network-unavailable"
+        operator: "Exists"
